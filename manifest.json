@@ -1,17 +1,10 @@
 {
-  "name": "WitAnime Repo",
+  "id": "witanime",
+  "name": "WitAnime",
+  "description": "Arabic anime streaming from WitAnime (witanime.you/cyou/pics)",
   "version": "1.0.0",
-  "scrapers": [
-    {
-      "id": "witanime",
-      "name": "WitAnime",
-      "description": "Arabic anime streaming from witanime.cyou",
-      "version": "1.0.0",
-      "author": "OmarRayeq",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/witanime.js",
-      "enabled": true,
-      "contentLanguage": ["ar"]
-    }
-  ]
+  "filename": "providers/witanime.js",
+  "supportedTypes": ["movie", "tv"],
+  "enabled": true,
+  "language": "ar"
 }
