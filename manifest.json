@@ -1,10 +1,17 @@
 {
-  "id": "witanime",
-  "name": "WitAnime",
-  "description": "Arabic anime streaming from WitAnime (witanime.you/cyou/pics)",
-  "version": "1.0.0",
-  "filename": "providers/witanime.js",
-  "supportedTypes": ["movie", "tv"],
-  "enabled": true,
-  "language": "ar"
+  "plugins": [
+    {
+      "id": "witanime",
+      "name": "WitAnime",
+      "description": "Arabic anime streaming from WitAnime",
+      "version": "1.0.0",
+      "url": "providers/witanime.js",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "enabled": true,
+      "language": "ar"
+    }
+  ]
 }
