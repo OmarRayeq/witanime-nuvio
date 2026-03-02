@@ -1,0 +1,10 @@
+{
+  "id": "witanime",
+  "name": "WitAnime",
+  "description": "Arabic anime streaming from witanime.cyou",
+  "version": "1.0.0",
+  "author": "You",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/witanime.js",
+  "enabled": true
+}
