@@ -1,17 +1,26 @@
 {
-  "plugins": [
+  "name": "WitAnime Repo",
+  "version": "1.0.0",
+  "scrapers": [
     {
       "id": "witanime",
       "name": "WitAnime",
       "description": "Arabic anime streaming from WitAnime",
       "version": "1.0.0",
-      "url": "providers/witanime.js",
+      "author": "OmarRayeq",
       "supportedTypes": [
         "movie",
         "tv"
       ],
+      "filename": "providers/witanime.js",
       "enabled": true,
-      "language": "ar"
+      "formats": [
+        "m3u8",
+        "mp4"
+      ],
+      "contentLanguage": [
+        "ar"
+      ]
     }
   ]
 }
