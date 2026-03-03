@@ -30,11 +30,9 @@ function b64Decode(input) {
     var enc2 = B64_CHARS.indexOf(input.charAt(i++));
     var enc3 = B64_CHARS.indexOf(input.charAt(i++));
     var enc4 = B64_CHARS.indexOf(input.charAt(i++));
-
     var chr1 = (enc1 << 2) | (enc2 >> 4);
     var chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
     var chr3 = ((enc3 & 3) << 6) | enc4;
-
     str += String.fromCharCode(chr1);
     if (enc3 !== 64) str += String.fromCharCode(chr2);
     if (enc4 !== 64) str += String.fromCharCode(chr3);
@@ -42,13 +40,9 @@ function b64Decode(input) {
   return str;
 }
 
-// ─── Utility: reverse a string ───────────────────────────────────────────────
+function reverseString(s) { return s.split("").reverse().join(""); }
 
-function reverseString(s) {
-  return s.split("").reverse().join("");
-}
-
-// ─── Utility: XOR decrypt hex-encoded string with key ────────────────────────
+// ─── XOR decrypt hex-encoded string ──────────────────────────────────────────
 
 function xorDecrypt(hexStr, key) {
   var result = "";
@@ -58,6 +52,59 @@ function xorDecrypt(hexStr, key) {
     result += String.fromCharCode(byte ^ keyByte);
   }
   return result;
+}
+
+// ─── P.A.C.K.E.R. unpacker for hlswish/filemoon-type hosts ──────────────────
+
+function unpackPacker(packed) {
+  // Position-based parser to handle escaped quotes in payloads
+  // Structure: eval(function(p,a,c,k,e,d){...}('payload',base,count,'dict'.split('|'),0,{}))
+
+  // Find the dictionary using the split('|') anchor
+  var splitIdx = packed.lastIndexOf(".split('|')");
+  if (splitIdx === -1) return null;
+
+  // Find the dictionary: search backwards for ,'
+  var dictStart = packed.lastIndexOf(",'", splitIdx);
+  if (dictStart === -1) return null;
+  var dict = packed.substring(dictStart + 2, splitIdx);
+
+  // Find base and count: search backwards for ,base,count pattern
+  var beforeDict = packed.substring(0, dictStart);
+  var countMatch = beforeDict.match(/,\s*(\d+)\s*,\s*(\d+)\s*$/);
+  if (!countMatch) return null;
+  var a = parseInt(countMatch[1], 10);
+  var c = parseInt(countMatch[2], 10);
+
+  // Find the payload: between }(' and ,base,count
+  var payloadEnd = beforeDict.length - countMatch[0].length;
+  var funcEnd = packed.indexOf("}('");
+  if (funcEnd === -1) {
+    funcEnd = packed.indexOf("}(\"");
+    if (funcEnd === -1) return null;
+  }
+  var payloadStart = funcEnd + 3;
+  var p = packed.substring(payloadStart, payloadEnd);
+  // Remove trailing quote
+  if (p.charAt(p.length - 1) === "'" || p.charAt(p.length - 1) === '"') {
+    p = p.substring(0, p.length - 1);
+  }
+
+  var k = dict.split("|");
+
+  function baseN(val, base) {
+    var alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (val < base) return alphabet.charAt(val);
+    return baseN(Math.floor(val / base), base) + alphabet.charAt(val % base);
+  }
+
+  while (c--) {
+    if (k[c]) {
+      p = p.replace(new RegExp("\\b" + baseN(c, a) + "\\b", "g"), k[c]);
+    }
+  }
+
+  return p;
 }
 
 // ─── Utility: safe fetch with domain fallback ────────────────────────────────
@@ -76,92 +123,68 @@ function fetchWithFallback(path, domainIndex) {
     redirect: "follow"
   }).then(function (res) {
     if (!res.ok) {
-      console.log("[WitAnime] HTTP " + res.status + " from " + BASE_DOMAINS[domainIndex] + ", trying next domain...");
+      console.log("[WitAnime] HTTP " + res.status + " from " + BASE_DOMAINS[domainIndex]);
       return fetchWithFallback(path, domainIndex + 1);
     }
     res._workingDomain = BASE_DOMAINS[domainIndex];
     return res;
   }).catch(function (err) {
-    console.log("[WitAnime] Fetch error from " + BASE_DOMAINS[domainIndex] + ": " + err.message);
+    console.log("[WitAnime] Fetch error: " + err.message);
     return fetchWithFallback(path, domainIndex + 1);
   });
 }
 
-// ─── Step 1: Get anime title from TMDB ───────────────────────────────────────
+// ─── TMDB title lookup ───────────────────────────────────────────────────────
 
 function getTmdbTitle(tmdbId, mediaType) {
   var url = "https://api.themoviedb.org/3/" + mediaType + "/" + tmdbId + "?api_key=" + TMDB_API_KEY + "&language=en-US";
-  console.log("[WitAnime] Fetching TMDB info: " + url);
-
-  var mainDataPromise = fetch(url, { headers: { "User-Agent": DEFAULT_HEADERS["User-Agent"] } })
-    .then(function (res) { return res.json(); });
-
-  var altTitlesUrl = "https://api.themoviedb.org/3/" + mediaType + "/" + tmdbId + "/alternative_titles?api_key=" + TMDB_API_KEY;
-  var altTitlesPromise = fetch(altTitlesUrl, { headers: { "User-Agent": DEFAULT_HEADERS["User-Agent"] } })
-    .then(function (res) { return res.json(); })
+  var mainP = fetch(url, { headers: { "User-Agent": DEFAULT_HEADERS["User-Agent"] } })
+    .then(function (r) { return r.json(); });
+  var altUrl = "https://api.themoviedb.org/3/" + mediaType + "/" + tmdbId + "/alternative_titles?api_key=" + TMDB_API_KEY;
+  var altP = fetch(altUrl, { headers: { "User-Agent": DEFAULT_HEADERS["User-Agent"] } })
+    .then(function (r) { return r.json(); })
     .catch(function () { return { results: [], titles: [] }; });
 
-  return Promise.all([mainDataPromise, altTitlesPromise]).then(function (responses) {
-    var data = responses[0];
-    var altData = responses[1];
-
+  return Promise.all([mainP, altP]).then(function (res) {
+    var data = res[0], altData = res[1];
     var englishName = data.name || data.title || "";
     var originalName = data.original_name || data.original_title || "";
-
     var altTitles = altData.results || altData.titles || [];
     var romajiTitle = "";
 
     for (var i = 0; i < altTitles.length; i++) {
-      var alt = altTitles[i];
-      var t = alt.title || "";
-      if (alt.iso_3166_1 === "JP" && /^[\x20-\x7E]+$/.test(t)) {
+      var t = altTitles[i].title || "";
+      if (altTitles[i].iso_3166_1 === "JP" && /^[\x20-\x7E]+$/.test(t)) {
         romajiTitle = t;
         break;
       }
     }
-
-    var isOriginalLatin = /^[\x20-\x7E]+$/.test(originalName.trim());
-    if (!romajiTitle && isOriginalLatin && originalName) {
+    if (!romajiTitle && /^[\x20-\x7E]+$/.test(originalName.trim()) && originalName) {
       romajiTitle = originalName;
     }
-
-    console.log("[WitAnime] TMDB English name: " + englishName);
-    console.log("[WitAnime] TMDB romaji title: " + romajiTitle);
 
     var titles = [];
     if (romajiTitle) titles.push(romajiTitle);
     if (englishName && titles.indexOf(englishName) === -1) titles.push(englishName);
     if (originalName && titles.indexOf(originalName) === -1) titles.push(originalName);
-
-    var primary = titles[0] || englishName;
-    return { primary: primary, alternatives: titles.slice(1) };
+    return { primary: titles[0] || englishName, alternatives: titles.slice(1) };
   });
 }
 
-// ─── Step 1b: Search with title fallbacks ────────────────────────────────────
+// ─── Search & select ─────────────────────────────────────────────────────────
 
 function searchWithFallbacks(titleInfo) {
   if (!titleInfo || !titleInfo.primary) return Promise.resolve([]);
-
   return searchAnime(titleInfo.primary).then(function (results) {
     if (results.length > 0) return results;
-
     var alts = titleInfo.alternatives || [];
     if (alts.length === 0) return results;
-
-    console.log("[WitAnime] Primary search failed, trying alternative: " + alts[0]);
-    return searchAnime(alts[0]).then(function (altResults) {
-      if (altResults.length > 0) return altResults;
-      if (alts.length > 1) {
-        console.log("[WitAnime] Trying alternative: " + alts[1]);
-        return searchAnime(alts[1]);
-      }
-      return altResults;
+    return searchAnime(alts[0]).then(function (r2) {
+      if (r2.length > 0 || alts.length <= 1) return r2;
+      return searchAnime(alts[1]);
     });
   });
 }
-
-// ─── Step 2: Search witanime ─────────────────────────────────────────────────
 
 function searchAnime(title) {
   var searchPath = "/?search_param=animes&s=" + encodeURIComponent(title);
@@ -172,11 +195,9 @@ function searchAnime(title) {
       var re = /href=["'](https?:\/\/[^"']*\/anime\/([^"'\/]+)\/)[^>]*>([^<]*)<\/a>/g;
       var m;
       while ((m = re.exec(html)) !== null) {
-        var href = m[1];
-        var slug = m[2];
         var name = m[3].trim();
-        if (name && slug && results.findIndex(function (r) { return r.slug === slug; }) === -1) {
-          results.push({ href: href, slug: slug, name: name });
+        if (name && m[2] && results.findIndex(function (r) { return r.slug === m[2]; }) === -1) {
+          results.push({ href: m[1], slug: m[2], name: name });
         }
       }
       console.log("[WitAnime] Search found " + results.length + " results");
@@ -184,545 +205,592 @@ function searchAnime(title) {
     });
 }
 
-// ─── Step 3: Pick best match for season ──────────────────────────────────────
-
 function pickAnimeForSeason(results, title, season, mediaType) {
   if (!results || results.length === 0) return null;
-
-  var titleLower = title.toLowerCase().replace(/[^a-z0-9]/g, "");
-
   if (mediaType === "movie") {
+    var tl = title.toLowerCase().replace(/[^a-z0-9]/g, "");
     for (var i = 0; i < results.length; i++) {
-      var nameLower = results[i].name.toLowerCase().replace(/[^a-z0-9]/g, "");
-      if (nameLower.indexOf(titleLower) !== -1 || titleLower.indexOf(nameLower) !== -1) {
-        return results[i];
-      }
+      var nl = results[i].name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (nl.indexOf(tl) !== -1 || tl.indexOf(nl) !== -1) return results[i];
     }
     return results[0];
   }
 
   if (season === 1) {
     for (var i = 0; i < results.length; i++) {
-      var slug = results[i].slug.toLowerCase();
-      if (slug.indexOf("season") === -1 && slug.indexOf("part") === -1 &&
-        slug.indexOf("2nd") === -1 && slug.indexOf("3rd") === -1 &&
-        slug.indexOf("4th") === -1 && slug.indexOf("final") === -1 &&
-        slug.indexOf("ova") === -1 && slug.indexOf("movie") === -1 &&
-        slug.indexOf("special") === -1) {
-        return results[i];
-      }
+      var s = results[i].slug.toLowerCase();
+      if (s.indexOf("season") === -1 && s.indexOf("part") === -1 &&
+        s.indexOf("2nd") === -1 && s.indexOf("3rd") === -1 && s.indexOf("4th") === -1 &&
+        s.indexOf("final") === -1 && s.indexOf("ova") === -1 &&
+        s.indexOf("movie") === -1 && s.indexOf("special") === -1) return results[i];
     }
     return results[0];
   }
 
-  var seasonPatterns = [
-    "season-" + season,
-    season + "nd-season",
-    season + "rd-season",
-    season + "th-season",
-    "-" + season + "-"
-  ];
-
+  var patterns = ["season-" + season, season + "nd-season", season + "rd-season", season + "th-season", "-" + season + "-"];
   for (var i = 0; i < results.length; i++) {
-    var slug = results[i].slug.toLowerCase();
-    for (var j = 0; j < seasonPatterns.length; j++) {
-      if (slug.indexOf(seasonPatterns[j]) !== -1) {
-        return results[i];
-      }
+    var sl = results[i].slug.toLowerCase();
+    for (var j = 0; j < patterns.length; j++) {
+      if (sl.indexOf(patterns[j]) !== -1) return results[i];
     }
   }
-
-  var partPatterns = ["part-" + season, "part" + season];
+  var pp = ["part-" + season, "part" + season];
   for (var i = 0; i < results.length; i++) {
-    var slug = results[i].slug.toLowerCase();
-    for (var j = 0; j < partPatterns.length; j++) {
-      if (slug.indexOf(partPatterns[j]) !== -1) {
-        return results[i];
-      }
-    }
+    var sl = results[i].slug.toLowerCase();
+    for (var j = 0; j < pp.length; j++) { if (sl.indexOf(pp[j]) !== -1) return results[i]; }
   }
-
-  console.log("[WitAnime] No exact season match, falling back to first result");
   return results[0];
 }
 
-// ─── Step 4: Get episode URL ─────────────────────────────────────────────────
+// ─── Get episode URL ─────────────────────────────────────────────────────────
 
 function getEpisodeUrl(anime, episode, mediaType) {
   if (!anime) return Promise.reject(new Error("No anime found"));
-
-  var domainMatch = anime.href.match(/https?:\/\/([^\/]+)/);
-  var domain = domainMatch ? domainMatch[1] : BASE_DOMAINS[0];
+  var dm = (anime.href.match(/https?:\/\/([^\/]+)/) || [])[1] || BASE_DOMAINS[0];
 
   if (mediaType === "movie") {
-    var moviePath = "/anime/" + anime.slug + "/";
-    return fetchWithFallback(moviePath)
+    return fetchWithFallback("/anime/" + anime.slug + "/")
       .then(function (res) { return res.text(); })
       .then(function (html) {
-        var epRe = /href=["'](https?:\/\/[^"']*\/episode\/[^"']+)["']/g;
-        var m = epRe.exec(html);
-        if (m) {
-          var epUrl = m[1];
-          var pathMatch = epUrl.match(/\/episode\/[^"']+/);
-          return { url: pathMatch ? pathMatch[0] : "/episode/" + anime.slug + "/", domain: domain };
-        }
-        return { url: "/episode/" + anime.slug + "/", domain: domain };
+        var m = /href=["'](https?:\/\/[^"']*\/episode\/[^"']+)["']/.exec(html);
+        var path = m ? (m[1].match(/\/episode\/[^"']+/) || ["/episode/" + anime.slug + "/"])[0] : "/episode/" + anime.slug + "/";
+        return { url: path, domain: dm };
       });
   }
-
-  var episodePath = "/episode/" + anime.slug + "-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-" + episode + "/";
-  return Promise.resolve({ url: episodePath, domain: domain });
+  return Promise.resolve({ url: "/episode/" + anime.slug + "-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-" + episode + "/", domain: dm });
 }
 
-// ─── Step 5: Extract download links from episode page (px9 system) ───────────
+// ─── Extract download links (px9 system) ─────────────────────────────────────
 
 function extractDownloadLinks(html) {
   var downloads = [];
-
-  // Extract _m (XOR key)
   var mMatch = html.match(/var\s+_m\s*=\s*(\{[^}]+\})/);
-  if (!mMatch) {
-    console.log("[WitAnime] No _m variable found, skipping download links");
-    return downloads;
-  }
+  if (!mMatch) return downloads;
 
   try {
-    var mObj = JSON.parse(mMatch[1]);
-    var xorKey = b64Decode(mObj.r);
-    console.log("[WitAnime] XOR key length: " + xorKey.length);
-
-    // Extract _t (count)
+    var xorKey = b64Decode(JSON.parse(mMatch[1]).r);
     var tMatch = html.match(/var\s+_t\s*=\s*(\{[^}]+\})/);
-    var count = 2; // default
-    if (tMatch) {
-      try {
-        var tObj = JSON.parse(tMatch[1]);
-        count = parseInt(tObj.l, 10) || 2;
-      } catch (e) { }
-    }
+    var count = 2;
+    if (tMatch) try { count = parseInt(JSON.parse(tMatch[1]).l, 10) || 2; } catch (e) { }
 
-    // Extract _s (reorder sequences)
     var sMatch = html.match(/var\s+_s\s*=\s*(\[[^\]]+\])/);
     var sequences = [];
-    if (sMatch) {
-      try {
-        sequences = JSON.parse(sMatch[1].replace(/'/g, '"'));
-      } catch (e) {
-        console.log("[WitAnime] _s parse error: " + e.message);
-      }
-    }
+    if (sMatch) try { sequences = JSON.parse(sMatch[1].replace(/'/g, '"')); } catch (e) { }
 
-    // Extract _a (quality/auth info)
-    var aMatch = html.match(/var\s+_a\s*=\s*(\[[\s\S]*?\]);/);
-    var authInfo = [];
-    if (aMatch) {
-      try {
-        authInfo = JSON.parse(aMatch[1].replace(/'/g, '"'));
-      } catch (e) { }
-    }
-
-    // For each download group, extract _p{i} and reassemble
     for (var i = 0; i < count; i++) {
-      var pRe = new RegExp("var\\s+_p" + i + "\\s*=\\s*(\\[[^\\]]+\\])");
-      var pMatch = html.match(pRe);
+      var pMatch = html.match(new RegExp("var\\s+_p" + i + "\\s*=\\s*(\\[[^\\]]+\\])"));
       if (!pMatch) continue;
-
       try {
         var chunks = JSON.parse(pMatch[1].replace(/'/g, '"'));
-
-        // Decrypt each chunk
-        var decrypted = [];
-        for (var c = 0; c < chunks.length; c++) {
-          decrypted.push(xorDecrypt(chunks[c], xorKey));
-        }
-
-        // Get reorder sequence from _s
+        var decrypted = chunks.map(function (c) { return xorDecrypt(c, xorKey); });
         var finalUrl = "";
         if (sequences[i]) {
           var seq = JSON.parse(xorDecrypt(sequences[i], xorKey));
           var arranged = new Array(seq.length);
-          for (var j = 0; j < seq.length; j++) {
-            arranged[seq[j]] = decrypted[j];
-          }
+          for (var j = 0; j < seq.length; j++) arranged[seq[j]] = decrypted[j];
           finalUrl = arranged.join("");
         } else {
-          // Fallback: just concatenate
           finalUrl = decrypted.join("");
         }
-
-        // Get service name from _a
-        var serviceName = "";
-        if (authInfo[i] && authInfo[i].t) {
-          serviceName = xorDecrypt(authInfo[i].t, xorKey);
-        }
-
         if (finalUrl && finalUrl.indexOf("http") === 0) {
-          console.log("[WitAnime] Download link " + i + " (" + serviceName + "): " + finalUrl);
-          downloads.push({ url: finalUrl, service: serviceName, index: i });
+          console.log("[WitAnime] Download link " + i + ": " + finalUrl.substring(0, 80));
+          downloads.push({ url: finalUrl, index: i });
         }
-      } catch (e) {
-        console.log("[WitAnime] Download group " + i + " error: " + e.message);
-      }
+      } catch (e) { console.log("[WitAnime] Download decode error: " + e.message); }
     }
-  } catch (e) {
-    console.log("[WitAnime] Download link extraction error: " + e.message);
-  }
-
+  } catch (e) { console.log("[WitAnime] Download extraction error: " + e.message); }
   return downloads;
 }
 
-// ─── Step 5b: Extract encrypted embeds from episode page ─────────────────────
-
-function getParamOffset(configObj) {
-  try {
-    if (!configObj || !configObj.d || !configObj.k) return 0;
-    var indexStr = b64Decode(configObj.k);
-    var idx = parseInt(indexStr, 10);
-    if (isNaN(idx) || idx < 0 || idx >= configObj.d.length) return 0;
-    return configObj.d[idx];
-  } catch (e) {
-    return 0;
-  }
-}
-
-function decodeResource(encoded, paramOffset) {
-  if (!encoded || typeof encoded !== "string") return null;
-  var reversed = reverseString(encoded);
-  var cleaned = reversed.replace(/[^A-Za-z0-9+/=]/g, "");
-  var decoded = b64Decode(cleaned);
-  if (paramOffset && paramOffset > 0 && decoded.length > paramOffset) {
-    decoded = decoded.slice(0, -paramOffset);
-  }
-  return decoded;
-}
+// ─── Extract embed URLs (_zG/_zH system) ─────────────────────────────────────
 
 function extractEmbeds(html) {
   var embeds = [];
-
   var zGMatch = html.match(/var\s+_zG\s*=\s*["']([^"']+)["']/);
   var zHMatch = html.match(/var\s+_zH\s*=\s*["']([^"']+)["']/);
+  if (!zGMatch) return embeds;
 
-  if (zGMatch) {
-    try {
-      var zGDecoded = b64Decode(zGMatch[1]);
-      var resources = JSON.parse(zGDecoded);
-      console.log("[WitAnime] Found " + resources.length + " embed resources");
-
-      var configs = [];
-      if (zHMatch) {
-        try {
-          var zHRaw = zHMatch[1];
-          while (zHRaw.length % 4 !== 0) zHRaw += "=";
-          var zHDecoded = b64Decode(zHRaw);
-          try {
-            configs = JSON.parse(zHDecoded);
-          } catch (e2) {
-            var lastBrace = zHDecoded.lastIndexOf("}");
-            if (lastBrace !== -1) {
-              configs = JSON.parse(zHDecoded.substring(0, lastBrace + 1) + "]");
-            }
-          }
-        } catch (e) { }
-      }
-
-      for (var i = 0; i < resources.length; i++) {
-        try {
-          var offset = (configs.length > i) ? getParamOffset(configs[i]) : 0;
-          var decoded = decodeResource(resources[i], offset);
-
-          if (decoded && (decoded.indexOf("http") === 0 || decoded.indexOf("//") === 0)) {
-            if (decoded.indexOf("//") === 0) decoded = "https:" + decoded;
-            if (decoded.indexOf("yonaplay.net") !== -1 && decoded.indexOf("apiKey") === -1) {
-              decoded += (decoded.indexOf("?") !== -1 ? "&" : "?") + "apiKey=1c0f3441-e3c2-4023-9e8b-bee77ff59adf";
-            }
-            embeds.push(decoded);
-          }
-        } catch (e) { }
-      }
-    } catch (e) {
-      console.log("[WitAnime] _zG parse error: " + e.message);
+  try {
+    var resources = JSON.parse(b64Decode(zGMatch[1]));
+    var configs = [];
+    if (zHMatch) {
+      try {
+        var raw = zHMatch[1]; while (raw.length % 4) raw += "=";
+        var d = b64Decode(raw);
+        try { configs = JSON.parse(d); } catch (e) {
+          var lb = d.lastIndexOf("}");
+          if (lb !== -1) configs = JSON.parse(d.substring(0, lb + 1) + "]");
+        }
+      } catch (e) { }
     }
-  }
 
+    for (var i = 0; i < resources.length; i++) {
+      try {
+        var c = configs[i];
+        var offset = (c && c.d && c.k) ? (function () {
+          var idx = parseInt(b64Decode(c.k), 10);
+          return (!isNaN(idx) && idx >= 0 && idx < c.d.length) ? c.d[idx] : 0;
+        })() : 0;
+        var rev = reverseString(resources[i]).replace(/[^A-Za-z0-9+/=]/g, "");
+        var dec = b64Decode(rev);
+        if (offset > 0 && dec.length > offset) dec = dec.slice(0, -offset);
+        if (dec && (dec.indexOf("http") === 0 || dec.indexOf("//") === 0)) {
+          if (dec.indexOf("//") === 0) dec = "https:" + dec;
+          embeds.push(dec);
+        }
+      } catch (e) { }
+    }
+  } catch (e) { }
+  console.log("[WitAnime] Found " + embeds.length + " embed URLs");
   return embeds;
 }
 
-// ─── Step 6: Resolve MediaFire page to direct download URL ───────────────────
+// ─── URL validation helper ───────────────────────────────────────────────────
 
-function resolveMediaFire(mediafireUrl) {
-  console.log("[WitAnime] Resolving MediaFire: " + mediafireUrl);
-  return fetch(mediafireUrl, {
-    headers: Object.assign({}, DEFAULT_HEADERS),
-    redirect: "follow"
-  })
-    .then(function (res) {
-      if (!res.ok) {
-        console.log("[WitAnime] MediaFire returned HTTP " + res.status);
-        return null;
-      }
-      return res.text();
-    })
+var URL_BLACKLIST = [
+  "googletagmanager", "google-analytics", "googlesyndication", "gstatic.com",
+  "cloudflareinsights", "cloudflare.com/cdn-cgi", "beacon.min.js",
+  "doubleclick.net", "facebook.com", "twitter.com", "yandex.ru",
+  "jquery", "bootstrap", "fontawesome", "recaptcha",
+  "matomo", "piwik", "analytics", "tracker", "pixel",
+  "ads.", "adserver", "pagead", "funding",
+  ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".ttf",
+  "favicon", "logo", "image", "assets/"
+];
+
+function isVideoUrl(url) {
+  if (!url || url.length < 20) return false;
+  var lower = url.toLowerCase();
+  for (var i = 0; i < URL_BLACKLIST.length; i++) {
+    if (lower.indexOf(URL_BLACKLIST[i]) !== -1) return false;
+  }
+  return true;
+}
+
+// ─── HOST RESOLVERS ──────────────────────────────────────────────────────────
+
+function getHostLabel(url) {
+  try {
+    var h = (url.match(/https?:\/\/([^\/]+)/) || ["", "unknown"])[1].toLowerCase();
+    if (h.indexOf("yonaplay") !== -1) return "Yonaplay";
+    if (h.indexOf("videa") !== -1) return "Videa";
+    if (h.indexOf("darkibox") !== -1) return "Darkibox";
+    if (h.indexOf("hlswish") !== -1) return "HLSwish";
+    if (h.indexOf("luluvdo") !== -1) return "Luluvdo";
+    if (h.indexOf("hglink") !== -1) return "HGLink";
+    if (h.indexOf("mp4upload") !== -1) return "MP4Upload";
+    if (h.indexOf("mediafire") !== -1) return "MediaFire";
+    if (h.indexOf("workupload") !== -1) return "Workupload";
+    if (h.indexOf("wahmi") !== -1) return "Wahmi";
+    if (h.indexOf("4shared") !== -1) return "4shared";
+    if (h.indexOf("linkbox") !== -1) return "Linkbox";
+    return h.split(".")[0].charAt(0).toUpperCase() + h.split(".")[0].slice(1);
+  } catch (e) { return "Unknown"; }
+}
+
+// --- MediaFire: Extract direct MP4 download URL ---
+function resolveMediaFire(url) {
+  console.log("[WitAnime] Resolving MediaFire: " + url.substring(0, 80));
+  return fetch(url, { headers: DEFAULT_HEADERS, redirect: "follow" })
+    .then(function (res) { return res.ok ? res.text() : null; })
     .then(function (html) {
       if (!html) return null;
-
-      // Look for the direct download URL
-      var dlMatch = html.match(/href=["'](https?:\/\/download[^"']+\.mp4[^"']*)["']/i);
-      if (!dlMatch) {
-        dlMatch = html.match(/aria-label=["']Download file["'][^>]*href=["']([^"']+)["']/i);
-      }
-      if (!dlMatch) {
-        dlMatch = html.match(/(https?:\/\/download[^\s"']+\.mp4[^\s"']*)/);
-      }
-
-      if (dlMatch) {
-        var directUrl = dlMatch[1];
-        console.log("[WitAnime] MediaFire direct URL: " + directUrl.substring(0, 80) + "...");
+      var m = html.match(/href=["'](https?:\/\/download[^"']+)["']/i)
+        || html.match(/(https?:\/\/download[^\s"']+\.mp4[^\s"']*)/);
+      if (m) {
+        console.log("[WitAnime] MediaFire direct URL found");
         return {
           name: "WitAnime",
           title: "MediaFire FHD (Arabic Sub)",
-          url: directUrl,
+          url: m[1],
           quality: "1080p",
           headers: {}
         };
       }
-
-      console.log("[WitAnime] No direct download URL found on MediaFire page");
       return null;
     })
-    .catch(function (err) {
-      console.log("[WitAnime] MediaFire resolve error: " + err.message);
-      return null;
-    });
+    .catch(function () { return null; });
 }
 
-// ─── Step 6b: Resolve Workupload page to direct download URL ─────────────────
-
-function resolveWorkupload(workuploadUrl) {
-  console.log("[WitAnime] Resolving Workupload: " + workuploadUrl);
-  return fetch(workuploadUrl, {
-    headers: Object.assign({}, DEFAULT_HEADERS),
+// --- Darkibox: Returns M3U8 URL directly in page HTML ---
+function resolveDarkibox(url) {
+  console.log("[WitAnime] Resolving Darkibox: " + url.substring(0, 80));
+  return fetch(url, {
+    headers: Object.assign({}, DEFAULT_HEADERS, { "Referer": "https://" + BASE_DOMAINS[0] + "/" }),
     redirect: "follow"
   })
-    .then(function (res) {
-      if (!res.ok) return null;
-      return res.text();
+    .then(function (res) { return res.ok ? res.text() : null; })
+    .then(function (html) {
+      if (!html) return null;
+      var m3u8 = html.match(/(https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*)/);
+      if (m3u8) {
+        var streamUrl = m3u8[1].replace(/\\/g, "");
+        // Clean up truncated query params
+        if (streamUrl.indexOf("&s") === streamUrl.length - 2) {
+          streamUrl = streamUrl.substring(0, streamUrl.length - 2);
+        }
+        console.log("[WitAnime] Darkibox M3U8 found");
+        return {
+          name: "WitAnime",
+          title: "Darkibox HLS (Arabic Sub)",
+          url: streamUrl,
+          quality: "1080p",
+          headers: { "Referer": url, "Origin": "https://darkibox.com" }
+        };
+      }
+      return null;
     })
+    .catch(function () { return null; });
+}
+
+// --- HLSwish/Filemoon: Unpack P.A.C.K.E.R. JS to find M3U8 ---
+function resolveHlswish(url) {
+  console.log("[WitAnime] Resolving HLSwish: " + url.substring(0, 80));
+  var domain = (url.match(/https?:\/\/([^\/]+)/) || ["", "hlswish.com"])[1];
+  return fetch(url, {
+    headers: Object.assign({}, DEFAULT_HEADERS, { "Referer": "https://" + BASE_DOMAINS[0] + "/" }),
+    redirect: "follow"
+  })
+    .then(function (res) { return res.ok ? res.text() : null; })
     .then(function (html) {
       if (!html) return null;
 
-      // Workupload has a direct download button
-      var dlMatch = html.match(/href=["'](https?:\/\/[^"']*\/dl\/[^"']+)["']/i);
-      if (!dlMatch) {
-        dlMatch = html.match(/id=["']download["'][^>]*href=["']([^"']+)["']/i);
-      }
-      if (!dlMatch) {
-        dlMatch = html.match(/(https?:\/\/workupload\.com\/start\/[^\s"']+)/);
-      }
-
-      if (dlMatch) {
-        var directUrl = dlMatch[1];
-        console.log("[WitAnime] Workupload direct URL: " + directUrl);
+      // Try direct M3U8 first
+      var m3u8 = html.match(/(https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*)/);
+      if (m3u8) {
+        console.log("[WitAnime] HLSwish direct M3U8 found");
         return {
           name: "WitAnime",
-          title: "Workupload FHD (Arabic Sub)",
-          url: directUrl,
+          title: "HLSwish HLS (Arabic Sub)",
+          url: m3u8[1].replace(/\\/g, ""),
           quality: "1080p",
-          headers: { "Referer": workuploadUrl }
+          headers: { "Referer": url, "Origin": "https://" + domain }
+        };
+      }
+
+      // Try unpacking P.A.C.K.E.R.
+      var packedMatch = html.match(/eval\(function\(p,a,c,k,e,[\w]\)\{[\s\S]*?\.split\('\|'\)/);
+      if (packedMatch) {
+        try {
+          var unpacked = unpackPacker(packedMatch[0]);
+          if (unpacked) {
+            // Find M3U8 in unpacked JS
+            m3u8 = unpacked.match(/(https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*)/);
+            if (m3u8) {
+              console.log("[WitAnime] HLSwish unpacked M3U8 found");
+              return {
+                name: "WitAnime",
+                title: "HLSwish HLS (Arabic Sub)",
+                url: m3u8[1].replace(/\\/g, ""),
+                quality: "1080p",
+                headers: { "Referer": url, "Origin": "https://" + domain }
+              };
+            }
+            // Also check for MP4
+            var mp4 = unpacked.match(/(https?:\/\/[^\s"'\\]+\.mp4[^\s"'\\]*)/);
+            if (mp4) {
+              console.log("[WitAnime] HLSwish unpacked MP4 found");
+              return {
+                name: "WitAnime",
+                title: "HLSwish MP4 (Arabic Sub)",
+                url: mp4[1].replace(/\\/g, ""),
+                quality: "1080p",
+                headers: { "Referer": url, "Origin": "https://" + domain }
+              };
+            }
+          }
+        } catch (e) {
+          console.log("[WitAnime] HLSwish unpack error: " + e.message);
+        }
+      }
+
+      return null;
+    })
+    .catch(function () { return null; });
+}
+
+// --- Luluvdo: Same as HLSwish (filemoon family) ---
+function resolveLuluvdo(url) {
+  console.log("[WitAnime] Resolving Luluvdo: " + url.substring(0, 80));
+  var domain = (url.match(/https?:\/\/([^\/]+)/) || ["", "luluvdo.com"])[1];
+  return fetch(url, {
+    headers: Object.assign({}, DEFAULT_HEADERS, { "Referer": "https://" + BASE_DOMAINS[0] + "/" }),
+    redirect: "follow"
+  })
+    .then(function (res) { return res.ok ? res.text() : null; })
+    .then(function (html) {
+      if (!html) return null;
+
+      var m3u8 = html.match(/(https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*)/);
+      if (m3u8) {
+        return {
+          name: "WitAnime",
+          title: "Luluvdo HLS (Arabic Sub)",
+          url: m3u8[1].replace(/\\/g, ""),
+          quality: "1080p",
+          headers: { "Referer": url, "Origin": "https://" + domain }
+        };
+      }
+
+      var packedMatch = html.match(/eval\(function\(p,a,c,k,e,[\w]\)\{[\s\S]*?\.split\('\|'\)/);
+      if (packedMatch) {
+        try {
+          var unpacked = unpackPacker(packedMatch[0]);
+          if (unpacked) {
+            m3u8 = unpacked.match(/(https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*)/);
+            if (m3u8) {
+              return {
+                name: "WitAnime",
+                title: "Luluvdo HLS (Arabic Sub)",
+                url: m3u8[1].replace(/\\/g, ""),
+                quality: "1080p",
+                headers: { "Referer": url, "Origin": "https://" + domain }
+              };
+            }
+          }
+        } catch (e) { }
+      }
+      return null;
+    })
+    .catch(function () { return null; });
+}
+
+// --- Generic embed resolver (try M3U8/MP4/source extraction + P.A.C.K.E.R.) ---
+function resolveGenericEmbed(url) {
+  var hostLabel = getHostLabel(url);
+  var domain = (url.match(/https?:\/\/([^\/]+)/) || ["", ""])[1];
+  console.log("[WitAnime] Resolving " + hostLabel + ": " + url.substring(0, 80));
+
+  return fetch(url, {
+    headers: Object.assign({}, DEFAULT_HEADERS, { "Referer": "https://" + BASE_DOMAINS[0] + "/" }),
+    redirect: "follow"
+  })
+    .then(function (res) { return res.ok ? res.text() : null; })
+    .then(function (html) {
+      if (!html) return null;
+
+      // Try direct M3U8
+      var m3u8 = html.match(/(https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*)/);
+      if (m3u8 && isVideoUrl(m3u8[1])) {
+        return {
+          name: "WitAnime",
+          title: hostLabel + " HLS (Arabic Sub)",
+          url: m3u8[1].replace(/\\/g, ""),
+          quality: "1080p",
+          headers: { "Referer": url, "Origin": "https://" + domain }
+        };
+      }
+
+      // Try P.A.C.K.E.R.
+      var packed = html.match(/eval\(function\(p,a,c,k,e,[\w]\)\{[\s\S]*?\.split\('\|'\)/);
+      if (packed) {
+        try {
+          var unpacked = unpackPacker(packed[0]);
+          if (unpacked) {
+            m3u8 = unpacked.match(/(https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*)/);
+            if (m3u8 && isVideoUrl(m3u8[1])) {
+              return {
+                name: "WitAnime",
+                title: hostLabel + " HLS (Arabic Sub)",
+                url: m3u8[1].replace(/\\/g, ""),
+                quality: "1080p",
+                headers: { "Referer": url, "Origin": "https://" + domain }
+              };
+            }
+            var mp4u = unpacked.match(/(https?:\/\/[^\s"'\\]+\.mp4[^\s"'\\]*)/);
+            if (mp4u && isVideoUrl(mp4u[1])) {
+              return {
+                name: "WitAnime",
+                title: hostLabel + " MP4 (Arabic Sub)",
+                url: mp4u[1].replace(/\\/g, ""),
+                quality: "1080p",
+                headers: { "Referer": url, "Origin": "https://" + domain }
+              };
+            }
+          }
+        } catch (e) { }
+      }
+
+      // Try MP4 (direct in HTML)
+      var mp4 = html.match(/(https?:\/\/[^\s"'\\]+\.mp4[^\s"'\\]*)/);
+      if (mp4 && mp4[1].length > 50 && isVideoUrl(mp4[1])) {
+        return {
+          name: "WitAnime",
+          title: hostLabel + " MP4 (Arabic Sub)",
+          url: mp4[1].replace(/\\/g, ""),
+          quality: "720p",
+          headers: { "Referer": url }
+        };
+      }
+
+      // Try file/source/video_url in JS config (NOT <script src=...>)
+      var srcRe = /["'](?:file|source|video_url)["']\s*[:=]\s*["'](https?:\/\/[^"']+)["']/gi;
+      var srcMatch;
+      while ((srcMatch = srcRe.exec(html)) !== null) {
+        if (isVideoUrl(srcMatch[1])) {
+          return {
+            name: "WitAnime",
+            title: hostLabel + " Stream (Arabic Sub)",
+            url: srcMatch[1].replace(/\\/g, ""),
+            quality: "auto",
+            headers: { "Referer": url }
+          };
+        }
+      }
+
+      // Try videojs player.src({src: "URL"}) pattern
+      var vjsSrc = html.match(/src\s*:\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i);
+      if (vjsSrc && isVideoUrl(vjsSrc[1])) {
+        var isHls = vjsSrc[1].indexOf(".m3u8") !== -1;
+        return {
+          name: "WitAnime",
+          title: hostLabel + (isHls ? " HLS" : " MP4") + " (Arabic Sub)",
+          url: vjsSrc[1].replace(/\\/g, ""),
+          quality: "auto",
+          headers: { "Referer": url, "Origin": "https://" + domain }
         };
       }
 
       return null;
     })
-    .catch(function (err) {
-      console.log("[WitAnime] Workupload resolve error: " + err.message);
-      return null;
-    });
+    .catch(function () { return null; });
 }
 
-// ─── Step 6c: Resolve embed URL (fallback) ───────────────────────────────────
+// ─── Smart resolver dispatcher ───────────────────────────────────────────────
 
-function getHostLabel(url) {
-  try {
-    var hostMatch = url.match(/https?:\/\/([^\/]+)/);
-    if (!hostMatch) return "Unknown";
-    var host = hostMatch[1].toLowerCase();
-    if (host.indexOf("yonaplay") !== -1) return "Yonaplay";
-    if (host.indexOf("videa") !== -1) return "Videa";
-    if (host.indexOf("streamtape") !== -1) return "Streamtape";
-    if (host.indexOf("dood") !== -1) return "Doodstream";
-    if (host.indexOf("vidmoly") !== -1) return "Vidmoly";
-    if (host.indexOf("mp4upload") !== -1) return "MP4Upload";
-    return host.split(".")[0].charAt(0).toUpperCase() + host.split(".")[0].slice(1);
-  } catch (e) {
-    return "Unknown";
+function resolveSource(url) {
+  var host = ((url.match(/https?:\/\/([^\/]+)/) || ["", ""])[1]).toLowerCase();
+
+  // Download hosts
+  if (host.indexOf("mediafire.com") !== -1) return resolveMediaFire(url);
+
+  // Embed hosts with dedicated resolvers
+  if (host.indexOf("darkibox") !== -1) return resolveDarkibox(url);
+  if (host.indexOf("hlswish") !== -1) return resolveHlswish(url);
+  if (host.indexOf("luluvdo") !== -1) return resolveLuluvdo(url);
+
+  // mp4upload: Convert download URL to embed URL format
+  if (host.indexOf("mp4upload") !== -1) {
+    // Transform /CODE to /embed-CODE.html
+    var mp4code = url.match(/mp4upload\.com\/(?:embed-)?([a-zA-Z0-9]+)/);
+    if (mp4code) {
+      var embedUrl = "https://www.mp4upload.com/embed-" + mp4code[1] + ".html";
+      console.log("[WitAnime] MP4Upload embed URL: " + embedUrl);
+      return resolveGenericEmbed(embedUrl);
+    }
+    return resolveGenericEmbed(url);
   }
-}
+  if (host.indexOf("swhoi") !== -1) return resolveGenericEmbed(url);
+  if (host.indexOf("soraplay") !== -1) return resolveGenericEmbed(url);
+  if (host.indexOf("hglink") !== -1) return resolveGenericEmbed(url);
 
-function resolveEmbed(embedUrl) {
-  if (!embedUrl) return Promise.resolve([]);
-
-  var hostLabel = getHostLabel(embedUrl);
-  console.log("[WitAnime] Resolving embed " + hostLabel + ": " + embedUrl);
-
-  return fetch(embedUrl, {
-    headers: Object.assign({}, DEFAULT_HEADERS, {
-      "Referer": "https://" + BASE_DOMAINS[0] + "/"
-    }),
-    redirect: "follow"
-  })
-    .then(function (res) {
-      if (!res.ok) {
-        console.log("[WitAnime] " + hostLabel + " returned HTTP " + res.status);
-        return [];
-      }
-      return res.text().then(function (html) {
-        var streams = [];
-
-        // Look for .m3u8 URLs (HLS)
-        var m3u8Re = /(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/g;
-        var m;
-        while ((m = m3u8Re.exec(html)) !== null) {
-          streams.push({
-            name: "WitAnime",
-            title: hostLabel + " HLS (Arabic Sub)",
-            url: m[1].replace(/\\/g, ""),
-            quality: "auto",
-            headers: { "Referer": embedUrl }
-          });
-        }
-
-        // Look for .mp4 URLs
-        var mp4Re = /(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/g;
-        while ((m = mp4Re.exec(html)) !== null) {
-          var mp4Url = m[1].replace(/\\/g, "");
-          if (mp4Url.indexOf("player") === -1 || mp4Url.length > 100) {
-            streams.push({
-              name: "WitAnime",
-              title: hostLabel + " MP4 (Arabic Sub)",
-              url: mp4Url,
-              quality: "720p",
-              headers: { "Referer": embedUrl }
-            });
-          }
-        }
-
-        // Look for "file"/"source" in JS config
-        if (streams.length === 0) {
-          var fileRe = /["']?(?:file|source|src|video_url)["']?\s*[:=]\s*["'](https?:\/\/[^"']+)["']/gi;
-          while ((m = fileRe.exec(html)) !== null) {
-            var fileUrl = m[1];
-            if (fileUrl.indexOf(".js") === -1 && fileUrl.indexOf(".css") === -1 &&
-              fileUrl.indexOf(".png") === -1 && fileUrl.indexOf(".ico") === -1) {
-              streams.push({
-                name: "WitAnime",
-                title: hostLabel + " Stream (Arabic Sub)",
-                url: fileUrl.replace(/\\/g, ""),
-                quality: "auto",
-                headers: { "Referer": embedUrl }
-              });
-            }
-          }
-        }
-
-        if (streams.length > 0) {
-          console.log("[WitAnime] Extracted " + streams.length + " stream(s) from " + hostLabel);
-        }
-        return streams;
-      });
+  // Hosts that use JS redirects — follow the redirect URL
+  if (host.indexOf("suzihazarpc") !== -1 || host.indexOf("swanksome") !== -1) {
+    console.log("[WitAnime] Following JS redirect: " + url.substring(0, 80));
+    return fetch(url, {
+      headers: Object.assign({}, DEFAULT_HEADERS, { "Referer": "https://" + BASE_DOMAINS[0] + "/" }),
+      redirect: "follow"
     })
-    .catch(function (err) {
-      console.log("[WitAnime] " + hostLabel + " resolve error: " + err.message);
-      return [];
-    });
+      .then(function (res) { return res.ok ? res.text() : null; })
+      .then(function (html) {
+        if (!html) return null;
+        var redirect = html.match(/window\.location\.replace\(['"]([^'"]+)['"]\)/);
+        if (redirect) {
+          console.log("[WitAnime] JS redirect to: " + redirect[1].substring(0, 80));
+          return resolveGenericEmbed(redirect[1]);
+        }
+        // Try as generic embed anyway
+        return null;
+      })
+      .catch(function () { return null; });
+  }
+
+  // Skip hosts that are known to be unreachable server-side
+  if (host.indexOf("yonaplay") !== -1) {
+    console.log("[WitAnime] Skipping Yonaplay (Cloudflare blocked)");
+    return Promise.resolve(null);
+  }
+  if (host.indexOf("videa.hu") !== -1) {
+    console.log("[WitAnime] Skipping Videa (requires browser)");
+    return Promise.resolve(null);
+  }
+  if (host.indexOf("workupload") !== -1) {
+    console.log("[WitAnime] Skipping Workupload (anti-bot)");
+    return Promise.resolve(null);
+  }
+  if (host.indexOf("wahmi") !== -1) {
+    console.log("[WitAnime] Skipping Wahmi (requires browser)");
+    return Promise.resolve(null);
+  }
+
+  // Try generic resolution for any other unknown hosts
+  return resolveGenericEmbed(url);
 }
 
 // ─── Main: getStreams ────────────────────────────────────────────────────────
 
 function getStreams(tmdbId, mediaType, season, episode) {
-  console.log("[WitAnime] getStreams called: tmdbId=" + tmdbId + " type=" + mediaType + " S" + season + "E" + episode);
+  console.log("[WitAnime] getStreams: tmdbId=" + tmdbId + " type=" + mediaType + " S" + season + "E" + episode);
 
   return getTmdbTitle(String(tmdbId), mediaType)
     .then(function (titleInfo) {
-      if (!titleInfo || !titleInfo.primary) {
-        console.log("[WitAnime] No title found from TMDB");
-        return [];
-      }
+      if (!titleInfo || !titleInfo.primary) return [];
       return searchWithFallbacks(titleInfo)
         .then(function (results) {
           var anime = pickAnimeForSeason(results, titleInfo.primary, season || 1, mediaType);
-          if (!anime) {
-            console.log("[WitAnime] No matching anime found");
-            return [];
-          }
-          console.log("[WitAnime] Selected anime: " + anime.name + " (" + anime.slug + ")");
+          if (!anime) { console.log("[WitAnime] No anime found"); return []; }
+          console.log("[WitAnime] Selected: " + anime.name + " (" + anime.slug + ")");
           return getEpisodeUrl(anime, episode || 1, mediaType);
         })
-        .then(function (episodeInfo) {
-          if (!episodeInfo || !episodeInfo.url) return [];
-          console.log("[WitAnime] Episode URL: " + episodeInfo.url);
+        .then(function (epInfo) {
+          if (!epInfo || !epInfo.url) return [];
+          console.log("[WitAnime] Episode: " + epInfo.url);
 
-          // Fetch the episode page
-          return fetchWithFallback(episodeInfo.url)
+          return fetchWithFallback(epInfo.url)
             .then(function (res) { return res.text(); })
             .then(function (html) {
-              console.log("[WitAnime] Episode page loaded (" + html.length + " bytes)");
-
-              // ── Priority 1: Extract download links (MediaFire, Workupload) ──
+              // Collect all sources: download links + embeds
               var downloadLinks = extractDownloadLinks(html);
-              console.log("[WitAnime] Found " + downloadLinks.length + " download links");
-
-              // ── Priority 2: Extract embed URLs (Yonaplay, Videa, etc.) ──
               var embedUrls = extractEmbeds(html);
-              console.log("[WitAnime] Found " + embedUrls.length + " embed URLs");
 
-              // Resolve download links first (they give direct MP4s)
-              var downloadPromises = downloadLinks.map(function (dl) {
-                if (dl.url.indexOf("mediafire.com") !== -1) {
-                  return resolveMediaFire(dl.url);
-                } else if (dl.url.indexOf("workupload.com") !== -1) {
-                  return resolveWorkupload(dl.url);
+              // Build unique URL list: downloads first, then embeds
+              var allUrls = [];
+              var seenHosts = {};
+              downloadLinks.forEach(function (dl) {
+                var h = ((dl.url.match(/https?:\/\/([^\/]+)/) || ["", ""])[1]).toLowerCase();
+                // Only add one link per host
+                if (!seenHosts[h]) {
+                  seenHosts[h] = true;
+                  allUrls.push(dl.url);
                 }
-                // Unknown download service, skip
-                return Promise.resolve(null);
+              });
+              embedUrls.forEach(function (u) {
+                var h = ((u.match(/https?:\/\/([^\/]+)/) || ["", ""])[1]).toLowerCase();
+                if (!seenHosts[h]) {
+                  seenHosts[h] = true;
+                  allUrls.push(u);
+                }
               });
 
-              // Resolve embeds as fallback
-              var embedPromises = embedUrls.map(function (embedUrl) {
-                return resolveEmbed(embedUrl).catch(function () { return []; });
+              console.log("[WitAnime] Total sources to resolve: " + allUrls.length);
+
+              // Resolve all in parallel
+              var promises = allUrls.map(function (u) {
+                return resolveSource(u).catch(function () { return null; });
               });
 
-              return Promise.all(downloadPromises.concat(embedPromises)).then(function (results) {
-                var allStreams = [];
-
-                // Collect download results (single stream objects or null)
-                for (var i = 0; i < downloadLinks.length; i++) {
-                  if (results[i]) {
-                    allStreams.push(results[i]);
+              return Promise.all(promises).then(function (results) {
+                var streams = [];
+                var seenUrl = {};
+                for (var i = 0; i < results.length; i++) {
+                  var r = results[i];
+                  if (r && r.url && !seenUrl[r.url]) {
+                    seenUrl[r.url] = true;
+                    streams.push(r);
                   }
                 }
-
-                // Collect embed results (arrays of streams)
-                for (var i = downloadLinks.length; i < results.length; i++) {
-                  var embedStreams = results[i];
-                  if (Array.isArray(embedStreams)) {
-                    for (var j = 0; j < embedStreams.length; j++) {
-                      allStreams.push(embedStreams[j]);
-                    }
-                  }
-                }
-
-                // Deduplicate by URL
-                var seen = {};
-                var unique = [];
-                for (var i = 0; i < allStreams.length; i++) {
-                  if (!seen[allStreams[i].url]) {
-                    seen[allStreams[i].url] = true;
-                    unique.push(allStreams[i]);
-                  }
-                }
-
-                console.log("[WitAnime] Total streams found: " + unique.length);
-                return unique;
+                console.log("[WitAnime] Total playable streams: " + streams.length);
+                return streams;
               });
             });
         });
