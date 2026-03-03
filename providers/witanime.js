@@ -293,8 +293,14 @@ function extractDownloadLinks(html) {
           finalUrl = decrypted.join("");
         }
         if (finalUrl && finalUrl.indexOf("http") === 0) {
-          console.log("[WitAnime] Download link " + i + ": " + finalUrl.substring(0, 80));
-          downloads.push({ url: finalUrl, index: i });
+          // Extract quality from filename
+          var quality = "unknown";
+          var urlLower = finalUrl.toLowerCase();
+          if (urlLower.indexOf("-fhd") !== -1 || urlLower.indexOf("_fhd") !== -1 || urlLower.indexOf("fhd.") !== -1) quality = "1080p";
+          else if (urlLower.indexOf("-hd") !== -1 || urlLower.indexOf("_hd") !== -1 || urlLower.indexOf("hd.") !== -1) quality = "720p";
+          else if (urlLower.indexOf("-sd") !== -1 || urlLower.indexOf("_sd") !== -1 || urlLower.indexOf("sd.") !== -1) quality = "480p";
+          console.log("[WitAnime] Download link " + i + " (" + quality + "): " + finalUrl.substring(0, 80));
+          downloads.push({ url: finalUrl, index: i, quality: quality });
         }
       } catch (e) { console.log("[WitAnime] Download decode error: " + e.message); }
     }
@@ -389,7 +395,7 @@ function getHostLabel(url) {
 }
 
 // --- MediaFire: Extract direct MP4 download URL ---
-function resolveMediaFire(url) {
+function resolveMediaFire(url, qualityHint) {
   console.log("[WitAnime] Resolving MediaFire: " + url.substring(0, 80));
   return fetch(url, { headers: DEFAULT_HEADERS, redirect: "follow" })
     .then(function (res) { return res.ok ? res.text() : null; })
@@ -398,12 +404,22 @@ function resolveMediaFire(url) {
       var m = html.match(/href=["'](https?:\/\/download[^"']+)["']/i)
         || html.match(/(https?:\/\/download[^\s"']+\.mp4[^\s"']*)/);
       if (m) {
-        console.log("[WitAnime] MediaFire direct URL found");
+        // Extract quality from filename if not provided
+        var q = qualityHint || "auto";
+        if (q === "unknown" || q === "auto") {
+          var dl = m[1].toLowerCase();
+          if (dl.indexOf("fhd") !== -1) q = "1080p";
+          else if (dl.indexOf("-hd") !== -1 || dl.indexOf("_hd") !== -1) q = "720p";
+          else if (dl.indexOf("-sd") !== -1 || dl.indexOf("_sd") !== -1) q = "480p";
+          else q = "1080p";
+        }
+        var qualityLabel = q === "1080p" ? "FHD" : q === "720p" ? "HD" : q === "480p" ? "SD" : "";
+        console.log("[WitAnime] MediaFire direct URL found (" + q + ")");
         return {
           name: "WitAnime",
-          title: "MediaFire FHD (Arabic Sub)",
+          title: "MediaFire " + qualityLabel + " (Arabic Sub)",
           url: m[1],
-          quality: "1080p",
+          quality: q,
           headers: {}
         };
       }
@@ -658,11 +674,11 @@ function resolveGenericEmbed(url) {
 
 // ─── Smart resolver dispatcher ───────────────────────────────────────────────
 
-function resolveSource(url) {
+function resolveSource(url, qualityHint) {
   var host = ((url.match(/https?:\/\/([^\/]+)/) || ["", ""])[1]).toLowerCase();
 
   // Download hosts
-  if (host.indexOf("mediafire.com") !== -1) return resolveMediaFire(url);
+  if (host.indexOf("mediafire.com") !== -1) return resolveMediaFire(url, qualityHint);
 
   // Embed hosts with dedicated resolvers
   if (host.indexOf("darkibox") !== -1) return resolveDarkibox(url);
@@ -753,30 +769,26 @@ function getStreams(tmdbId, mediaType, season, episode) {
               var downloadLinks = extractDownloadLinks(html);
               var embedUrls = extractEmbeds(html);
 
-              // Build unique URL list: downloads first, then embeds
+              // Build URL list: ALL download links + embeds (no host dedup)
               var allUrls = [];
-              var seenHosts = {};
               downloadLinks.forEach(function (dl) {
-                var h = ((dl.url.match(/https?:\/\/([^\/]+)/) || ["", ""])[1]).toLowerCase();
-                // Only add one link per host
-                if (!seenHosts[h]) {
-                  seenHosts[h] = true;
-                  allUrls.push(dl.url);
-                }
+                allUrls.push({ url: dl.url, quality: dl.quality || "unknown" });
               });
+              // Add embeds (dedup by host since embeds are same quality)
+              var seenEmbedHosts = {};
               embedUrls.forEach(function (u) {
                 var h = ((u.match(/https?:\/\/([^\/]+)/) || ["", ""])[1]).toLowerCase();
-                if (!seenHosts[h]) {
-                  seenHosts[h] = true;
-                  allUrls.push(u);
+                if (!seenEmbedHosts[h]) {
+                  seenEmbedHosts[h] = true;
+                  allUrls.push({ url: u, quality: "auto" });
                 }
               });
 
               console.log("[WitAnime] Total sources to resolve: " + allUrls.length);
 
               // Resolve all in parallel
-              var promises = allUrls.map(function (u) {
-                return resolveSource(u).catch(function () { return null; });
+              var promises = allUrls.map(function (item) {
+                return resolveSource(item.url, item.quality).catch(function () { return null; });
               });
 
               return Promise.all(promises).then(function (results) {
